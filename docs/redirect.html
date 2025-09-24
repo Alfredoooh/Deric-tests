@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Deriv redirect</title></head>
+<body>
+<script>
+  try{
+    // lê query e fragment
+    const params = new URLSearchParams(window.location.search + window.location.hash.replace(/^#/, '?'));
+    const code = params.get('code') || params.get('access_token');
+    const error = params.get('error');
+    if (error) {
+      document.body.innerText = 'OAuth error: ' + error;
+    } else if (!code) {
+      document.body.innerText = 'Nenhum code/token encontrado';
+    } else {
+      const scheme = 'com.alfredoooh.deriv://auth-callback';
+      const target = scheme + '?code=' + encodeURIComponent(code);
+      // abre a app (vai chamar o intent-filter)
+      window.location.replace(target);
+    }
+  } catch(e){
+    document.body.innerText = 'Redirect page error: ' + e;
+  }
+</script>
+</body>
+</html>
