@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Deriv — Client-only (test)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    body { background:#071129; color:#e6eef8; font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin:0; min-height:100vh; }
+    .container { max-width:720px; margin:12px auto; padding:12px; }
+    .card { background:#0b2130; padding:12px; border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,0.4); }
+    .muted { color:#9fb6c4; font-size:13px; }
+    .btn { display:inline-block; width:100%; padding:12px; border-radius:10px; font-weight:600; text-align:center; }
+    .btn-primary { background:#06b6d4; color:#042028; }
+    .btn-ghost { background:transparent; border:1px solid rgba(255,255,255,0.06); color:#cfeaf6; }
+    #chart { height:240px; }
+    .small { font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="mb-4">
+      <h1 class="text-xl font-bold">Deriv — Client-only (Teste)</h1>
+      <div class="muted small">App ID: <strong>71954</strong> • Uso apenas para testar <em>read</em> scope</div>
+    </header>
+
+    <section class="card mb-4" id="entryCard">
+      <p class="muted small">Este cliente usa o fluxo *implicit* (token no fragment). Testa primeiro com <strong>scope=read</strong> para validar redirect. Não guarde tokens sensíveis aqui.</p>
+      <div style="height:10px"></div>
+      <a id="loginBtn" class="btn btn-primary" href="#" role="button">Entrar com Deriv (test: read)</a>
+      <div style="height:8px"></div>
+      <button id="logoutBtn" class="btn btn-ghost" style="display:none">Logout (remover token)</button>
+      <div id="info" class="muted small mt-3"></div>
+    </section>
+
+    <section class="card mb-4" id="appCard" style="display:none">
+      <div class="flex justify-between">
+        <div>
+          <div id="loginid" class="font-semibold">—</div>
+          <div id="currency" class="muted small">—</div>
+        </div>
+        <div class="text-right">
+          <div class="muted small">Saldo</div>
+          <div id="balance" class="font-bold">—</div>
+        </div>
+      </div>
+
+      <div class="mt-3">
+        <label class="small">Símbolo</label>
+        <select id="symbol" class="w-full p-2 rounded mt-1 bg-[#071b27] border border-transparent">
+          <option value="R_100">R_100</option>
+          <option value="R_50">R_50</option>
+          <option value="R_25">R_25</option>
+          <option value="R_10">R_10</option>
+        </select>
+      </div>
+
+      <div class="mt-3 flex gap-2">
+        <button id="subscribeBtn" class="btn btn-primary" style="flex:1">Subscrever ticks</button>
+        <button id="clearChartBtn" class="btn btn-ghost" style="flex:1">Limpar</button>
+      </div>
+
+      <div id="chart" class="mt-3"></div>
+    </section>
+
+    <footer class="muted small mt-4">
+      <div>Notas: se <code>scope=read</code> funcionar mas <code>trade</code> der <code>scope_denied</code>, a Deriv provavelmente exige backend/approvação para trading. Para trading real, implemente backend. </div>
+    </footer>
+  </div>
+
+<script>
+/* ---------- CONFIG ---------- */
+const APP_ID = '71954';
+const REDIRECT_URI = 'https://alfredoooh.github.io/Deric-tests/index.html';
+const OAUTH_LINK = 'https://oauth.deriv.com/oauth2/authorize'
+  + '?app_id=' + encodeURIComponent(APP_ID)
+  + '&redirect_uri=' + encodeURIComponent(REDIRECT_URI)
+  + '&response_type=token'
+  + '&scope=' + encodeURIComponent('read'); // Teste com read apenas
+
+/* ---------- UI refs ---------- */
+const loginBtn = document.getElementById('loginBtn');
+const logoutBtn = document.getElementById('logoutBtn');
+const infoEl = document.getElementById('info');
+const entryCard = document.getElementById('entryCard');
+const appCard = document.getElementById('appCard');
+const loginIdEl = document.getElementById('loginid');
+const currencyEl = document.getElementById('currency');
+const balanceEl = document.getElementById('balance');
+const subscribeBtn = document.getElementById('subscribeBtn');
+const clearChartBtn = document.getElementById('clearChartBtn');
+const chartEl = document.getElementById('chart');
+
+loginBtn.href = OAUTH_LINK;
+
+/* ---------- Helpers: clean url and parse token ---------- */
+function removeEncodedSpacesAndReload() {
+  try {
+    const href = window.location.href;
+    if (href.includes('%20')) {
+      const cleaned = href.replace(/%20+/g, '');
+      if (cleaned !== href) window.location.replace(cleaned);
+    }
+  } catch(e){}
+}
+
+function parseParams() {
+  const out = {};
+  try {
+    const u = new URL(window.location.href);
+    for (const [k,v] of u.searchParams) out[k]=v;
+    if (window.location.hash) {
+      const hash = window.location.hash.replace(/^#\/?/, '');
+      const hs = new URLSearchParams(hash);
+      for (const [k,v] of hs) if (!out[k]) out[k]=v;
+    }
+  } catch(e){}
+  return out;
+}
+
+/* ---------- Chart setup ---------- */
+const chart = LightweightCharts.createChart(chartEl, {
+  layout: { background: { color: '#071b27' }, textColor: '#e6eef8' },
+  timeScale: { timeVisible: true, secondsVisible: true }
+});
+const lineSeries = chart.addLineSeries();
+
+/* ---------- WebSocket / Authorize (client-only) ---------- */
+let ws = null;
+function connectAndAuthorize(token) {
+  if (!token) return;
+  infoEl.textContent = 'Conectando ao WS Deriv...';
+  const url = 'wss://ws.derivws.com/websockets/v3?app_id=' + encodeURIComponent(APP_ID);
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    infoEl.textContent = 'WS aberto — autorizando...';
+    ws.send(JSON.stringify({ authorize: token }));
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      // authorize response
+      if (msg.authorize) {
+        if (msg.authorize.error) {
+          infoEl.innerHTML = '<span style="color:#ffdede">Authorize error:</span> ' + (msg.authorize.error.message || JSON.stringify(msg.authorize));
+          return;
+        }
+        infoEl.textContent = 'Autorizado: ' + (msg.authorize.loginid || '');
+        loginIdEl.textContent = msg.authorize.loginid || '—';
+        currencyEl.textContent = msg.authorize.currency ? 'Currency: ' + msg.authorize.currency : '';
+        balanceEl.textContent = msg.authorize.balance !== undefined ? msg.authorize.balance : '—';
+        // show app UI
+        entryCard.style.display = 'none';
+        appCard.style.display = '';
+        logoutBtn.style.display = '';
+      }
+      // ticks handling
+      if (msg.tick) {
+        const q = parseFloat(msg.tick.quote);
+        const t = Math.floor(msg.tick.epoch);
+        lineSeries.update({ time: t, value: q });
+      }
+      if (msg.error) {
+        console.warn('API error', msg.error);
+      }
+    } catch(e){ console.error(e); }
+  };
+
+  ws.onclose = () => { infoEl.textContent = 'WS fechado'; };
+  ws.onerror = () => { infoEl.textContent = 'WS erro'; };
+}
+
+/* ---------- Token handling ---------- */
+function saveTokenForSession(token) {
+  try { sessionStorage.setItem('deriv_token', token); } catch(e){}
+}
+function getTokenFromSession() { return sessionStorage.getItem('deriv_token'); }
+function clearToken() { sessionStorage.removeItem('deriv_token'); }
+
+/* ---------- On load: clean url, parse token, connect ---------- */
+(function initOnLoad(){
+  removeEncodedSpacesAndReload();
+  const params = parseParams();
+
+  // show debug if error
+  if (params.error) {
+    infoEl.innerHTML = '<span style="color:#ffdede">OAuth error:</span> ' + (params.error_description || params.error) + '<br><span class="muted small">Se for scope_denied, verifica scopes & autoriza (ou testa com scope=read).</span>';
+  }
+
+  // find token in fragment or query
+  let token = null;
+  const tokenKeys = ['access_token','token','authorize','auth_token'];
+  for (const k of tokenKeys) if (params[k]) { token = params[k]; break; }
+  if (!token) {
+    // fallback: longest value
+    const vals = Object.values(params).sort((a,b)=> b.length - a.length);
+    if (vals.length && vals[0].length > 8) token = vals[0];
+  }
+
+  if (token) {
+    saveTokenForSession(token);
+    // cleanup URL to remove token (avoid exposing it in history)
+    try { history.replaceState({}, document.title, location.pathname); } catch(e){}
+    infoEl.textContent = 'Token detectado (guardado na sessão).';
+    connectAndAuthorize(token);
+    return;
+  }
+
+  // if no token in url, check sessionStorage for existing
+  const existing = getTokenFromSession();
+  if (existing) {
+    infoEl.textContent = 'Token da sessão detectado — a conectar...';
+    connectAndAuthorize(existing);
+    return;
+  }
+
+  infoEl.textContent = 'Sem token. Use o botão Entrar (abra em incógnito para testar).';
+})();
+
+/* ---------- UI actions ---------- */
+logoutBtn.addEventListener('click', () => {
+  clearToken();
+  try { if (ws) ws.close(); } catch(e){}
+  location.reload();
+});
+
+subscribeBtn.addEventListener('click', () => {
+  const symbol = document.getElementById('symbol').value;
+  if (!ws || ws.readyState !== 1) return alert('WS não conectado');
+  ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
+  infoEl.textContent = 'Subscrito: ' + symbol;
+});
+
+clearChartBtn.addEventListener('click', () => {
+  lineSeries.setData([]);
+});
+
+</script>
+</body>
+</html>
